@@ -41,8 +41,6 @@ from ...events.event import Event
 from ...models.base_llm_connection import BaseLlmConnection
 from ...models.llm_request import LlmRequest
 from ...models.llm_response import LlmResponse
-from ...telemetry import trace_send_data
-from ...telemetry import tracer
 from ...tools.base_toolset import BaseToolset
 from ...tools.tool_context import ToolContext
 
@@ -109,27 +107,21 @@ class BaseLlmFlow(ABC):
         async with llm.connect(llm_request) as llm_connection:
           if llm_request.contents:
             # Sends the conversation history to the model.
-            with tracer.start_as_current_span('send_data'):
+            if invocation_context.transcription_cache:
+              from . import audio_transcriber
 
-              if invocation_context.transcription_cache:
-                from . import audio_transcriber
-
-                audio_transcriber = audio_transcriber.AudioTranscriber(
-                    init_client=True
-                    if invocation_context.run_config.input_audio_transcription
-                    is None
-                    else False
-                )
-                contents = audio_transcriber.transcribe_file(invocation_context)
-                logger.debug('Sending history to model: %s', contents)
-                await llm_connection.send_history(contents)
-                invocation_context.transcription_cache = None
-                trace_send_data(invocation_context, event_id, contents)
-              else:
-                await llm_connection.send_history(llm_request.contents)
-                trace_send_data(
-                    invocation_context, event_id, llm_request.contents
-                )
+              audio_transcriber = audio_transcriber.AudioTranscriber(
+                  init_client=True
+                  if invocation_context.run_config.input_audio_transcription
+                  is None
+                  else False
+              )
+              contents = audio_transcriber.transcribe_file(invocation_context)
+              logger.debug('Sending history to model: %s', contents)
+              await llm_connection.send_history(contents)
+              invocation_context.transcription_cache = None
+            else:
+              await llm_connection.send_history(llm_request.contents)
 
           send_task = asyncio.create_task(
               self._send_to_model(llm_connection, invocation_context)
