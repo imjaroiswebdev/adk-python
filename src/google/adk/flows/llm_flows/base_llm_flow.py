@@ -41,7 +41,6 @@ from ...events.event import Event
 from ...models.base_llm_connection import BaseLlmConnection
 from ...models.llm_request import LlmRequest
 from ...models.llm_response import LlmResponse
-from ...telemetry import trace_call_llm
 from ...telemetry import trace_send_data
 from ...telemetry import tracer
 from ...tools.base_toolset import BaseToolset
@@ -602,58 +601,51 @@ class BaseLlmFlow(ABC):
 
     # Calls the LLM.
     llm = self.__get_llm(invocation_context)
-    with tracer.start_as_current_span('call_llm'):
-      if invocation_context.run_config.support_cfc:
-        invocation_context.live_request_queue = LiveRequestQueue()
-        responses_generator = self.run_live(invocation_context)
-        async for llm_response in self._run_and_handle_error(
-            responses_generator,
-            invocation_context,
-            llm_request,
-            model_response_event,
+    if invocation_context.run_config.support_cfc:
+      invocation_context.live_request_queue = LiveRequestQueue()
+      responses_generator = self.run_live(invocation_context)
+      async for llm_response in self._run_and_handle_error(
+          responses_generator,
+          invocation_context,
+          llm_request,
+          model_response_event,
+      ):
+        # Runs after_model_callback if it exists.
+        if altered_llm_response := await self._handle_after_model_callback(
+            invocation_context, llm_response, model_response_event
         ):
-          # Runs after_model_callback if it exists.
-          if altered_llm_response := await self._handle_after_model_callback(
-              invocation_context, llm_response, model_response_event
-          ):
-            llm_response = altered_llm_response
-          # only yield partial response in SSE streaming mode
-          if (
-              invocation_context.run_config.streaming_mode == StreamingMode.SSE
-              or not llm_response.partial
-          ):
-            yield llm_response
-          if llm_response.turn_complete:
-            invocation_context.live_request_queue.close()
-      else:
-        # Check if we can make this llm call or not. If the current call pushes
-        # the counter beyond the max set value, then the execution is stopped
-        # right here, and exception is thrown.
-        invocation_context.increment_llm_call_count()
-        responses_generator = llm.generate_content_async(
-            llm_request,
-            stream=invocation_context.run_config.streaming_mode
-            == StreamingMode.SSE,
-        )
-        async for llm_response in self._run_and_handle_error(
-            responses_generator,
-            invocation_context,
-            llm_request,
-            model_response_event,
+          llm_response = altered_llm_response
+        # only yield partial response in SSE streaming mode
+        if (
+            invocation_context.run_config.streaming_mode == StreamingMode.SSE
+            or not llm_response.partial
         ):
-          trace_call_llm(
-              invocation_context,
-              model_response_event.id,
-              llm_request,
-              llm_response,
-          )
-          # Runs after_model_callback if it exists.
-          if altered_llm_response := await self._handle_after_model_callback(
-              invocation_context, llm_response, model_response_event
-          ):
-            llm_response = altered_llm_response
-
           yield llm_response
+        if llm_response.turn_complete:
+          invocation_context.live_request_queue.close()
+    else:
+      # Check if we can make this llm call or not. If the current call pushes
+      # the counter beyond the max set value, then the execution is stopped
+      # right here, and exception is thrown.
+      invocation_context.increment_llm_call_count()
+      responses_generator = llm.generate_content_async(
+          llm_request,
+          stream=invocation_context.run_config.streaming_mode
+          == StreamingMode.SSE,
+      )
+      async for llm_response in self._run_and_handle_error(
+          responses_generator,
+          invocation_context,
+          llm_request,
+          model_response_event,
+      ):
+        # Runs after_model_callback if it exists.
+        if altered_llm_response := await self._handle_after_model_callback(
+            invocation_context, llm_response, model_response_event
+        ):
+          llm_response = altered_llm_response
+
+        yield llm_response
 
   async def _handle_before_model_callback(
       self,
